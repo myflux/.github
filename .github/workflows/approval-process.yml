@@ -197,13 +197,20 @@ jobs:
         uses: actions/github-script@v7
         env:
           ISSUE_URL: ${{ steps.create-issue.outputs.issue_url }}
+          PR_NUMBER: ${{ inputs.pr_number }}
         with:
           github-token: ${{ secrets.ORG_APPROVAL_TOKEN }}
           script: |
+            // Get PR to find head SHA
+            const pr = await github.rest.pulls.get({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              pull_number: Number(process.env.PR_NUMBER)
+            });
             await github.rest.repos.createCommitStatus({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              sha: context.sha,
+              sha: pr.data.head.sha,
               state: 'pending',
               description: 'Awaiting multi-stage approval',
               context: 'approval-process',
