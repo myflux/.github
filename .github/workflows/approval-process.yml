@@ -45,15 +45,19 @@ jobs:
         id: config
         run: |
           # Helper to normalize value to JSON array
+          # Handles both single values and arrays in YAML
           normalize_array() {
             local key="$1"
-            local val=$(yq ".$key" approval-config.yml)
-            if [[ "$val" == "null" ]]; then
+            # Use yq to check if it's an array and always output JSON
+            local kind=$(yq ".$key | kind" approval-config.yml)
+            if [[ "$kind" == "null" ]]; then
               echo "[]"
-            elif [[ "$val" == "["* ]]; then
-              yq -o=json ".$key" approval-config.yml
+            elif [[ "$kind" == "seq" ]]; then
+              # It's an array, output as compact JSON
+              yq -o=json -I=0 ".$key" approval-config.yml
             else
-              echo "[\"$val\"]"
+              # Single value, wrap in array
+              yq -o=json -I=0 "[.$key]" approval-config.yml
             fi
           }
 
