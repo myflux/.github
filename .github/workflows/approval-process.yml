@@ -44,34 +44,35 @@ jobs:
       - name: Read approval-config.yml
         id: config
         run: |
-          echo "=== Current directory ==="
-          pwd
-          echo "=== Files in root ==="
-          ls -la
-          echo "=== Contents of approval-config.yml ==="
-          cat approval-config.yml
-          echo "=== yq version ==="
-          yq --version
-          echo "=== yq output ==="
-          yq '.team_name' approval-config.yml
-          yq '.team_lead' approval-config.yml
+          # Helper to normalize value to JSON array
+          normalize_array() {
+            local key="$1"
+            local val=$(yq ".$key" approval-config.yml)
+            if [[ "$val" == "null" ]]; then
+              echo "[]"
+            elif [[ "$val" == "["* ]]; then
+              yq -o=json ".$key" approval-config.yml
+            else
+              echo "[\"$val\"]"
+            fi
+          }
 
-          echo "team_lead=$(yq '.team_lead' approval-config.yml)"         >> $GITHUB_OUTPUT
-          echo "product_owner=$(yq '.product_owner' approval-config.yml)" >> $GITHUB_OUTPUT
-          echo "eng_manager=$(yq '.eng_manager' approval-config.yml)"     >> $GITHUB_OUTPUT
-          echo "architect=$(yq '.architect' approval-config.yml)"         >> $GITHUB_OUTPUT
-          echo "director=$(yq '.director' approval-config.yml)"           >> $GITHUB_OUTPUT
-          echo "team_name=$(yq '.team_name' approval-config.yml)"         >> $GITHUB_OUTPUT
+          echo "team_leads=$(normalize_array 'team_lead')"           >> $GITHUB_OUTPUT
+          echo "product_owners=$(normalize_array 'product_owner')"   >> $GITHUB_OUTPUT
+          echo "eng_managers=$(normalize_array 'eng_manager')"       >> $GITHUB_OUTPUT
+          echo "architects=$(normalize_array 'architect')"           >> $GITHUB_OUTPUT
+          echo "directors=$(normalize_array 'director')"             >> $GITHUB_OUTPUT
+          echo "team_name=$(yq '.team_name' approval-config.yml)"    >> $GITHUB_OUTPUT
 
       - name: Create approval issue
         id: create-issue
         uses: actions/github-script@v7
         env:
-          TEAM_LEAD: ${{ steps.config.outputs.team_lead }}
-          PRODUCT_OWNER: ${{ steps.config.outputs.product_owner }}
-          ENG_MANAGER: ${{ steps.config.outputs.eng_manager }}
-          ARCHITECT: ${{ steps.config.outputs.architect }}
-          DIRECTOR: ${{ steps.config.outputs.director }}
+          TEAM_LEADS: ${{ steps.config.outputs.team_leads }}
+          PRODUCT_OWNERS: ${{ steps.config.outputs.product_owners }}
+          ENG_MANAGERS: ${{ steps.config.outputs.eng_managers }}
+          ARCHITECTS: ${{ steps.config.outputs.architects }}
+          DIRECTORS: ${{ steps.config.outputs.directors }}
           TEAM_NAME: ${{ steps.config.outputs.team_name }}
           PR_TITLE: ${{ inputs.pr_title }}
           PR_URL: ${{ inputs.pr_url }}
@@ -82,20 +83,29 @@ jobs:
         with:
           github-token: ${{ secrets.ORG_APPROVAL_TOKEN }}
           script: |
-            const teamLead     = process.env.TEAM_LEAD;
-            const productOwner = process.env.PRODUCT_OWNER;
-            const engManager   = process.env.ENG_MANAGER;
-            const architect    = process.env.ARCHITECT;
-            const director     = process.env.DIRECTOR;
-            const teamName     = process.env.TEAM_NAME;
-            const prTitle      = process.env.PR_TITLE;
-            const prUrl        = process.env.PR_URL;
-            const prAuthor     = process.env.PR_AUTHOR;
-            const prReviewer   = process.env.PR_REVIEWER;
-            const prNumber     = process.env.PR_NUMBER;
-            const repoName     = process.env.REPO_NAME;
+            const teamLeads     = JSON.parse(process.env.TEAM_LEADS || '[]');
+            const productOwners = JSON.parse(process.env.PRODUCT_OWNERS || '[]');
+            const engManagers   = JSON.parse(process.env.ENG_MANAGERS || '[]');
+            const architects    = JSON.parse(process.env.ARCHITECTS || '[]');
+            const directors     = JSON.parse(process.env.DIRECTORS || '[]');
+            const teamName      = process.env.TEAM_NAME;
+            const prTitle       = process.env.PR_TITLE;
+            const prUrl         = process.env.PR_URL;
+            const prAuthor      = process.env.PR_AUTHOR;
+            const prReviewer    = process.env.PR_REVIEWER;
+            const prNumber      = process.env.PR_NUMBER;
+            const repoName      = process.env.REPO_NAME;
 
-            const body = [
+            // Helper to generate checkboxes for a role (any one can approve)
+            const checkboxes = (role, people) => {
+              if (people.length === 0) return [];
+              if (people.length === 1) {
+                return ['- [ ] **' + role + '** ' + people[0]];
+              }
+              return people.map(p => '- [ ] **' + role + '** ' + p + ' _(any one)_');
+            };
+
+            const lines = [
               '## PR Approval Request',
               '',
               '| Field | Value |',
@@ -114,54 +124,62 @@ jobs:
               '- [x] **Team Reviewer** @' + prReviewer + ' — Code review approved',
               '',
               '### Stage 2 — Leadership Sign-off',
-              '- [ ] **Tech Lead** ' + teamLead,
-              '- [ ] **Product Owner** ' + productOwner,
-              '- [ ] **Engineering Manager** ' + engManager,
+              ...checkboxes('Tech Lead', teamLeads),
+              ...checkboxes('Product Owner', productOwners),
+              ...checkboxes('Engineering Manager', engManagers),
               '',
               '### Stage 3 — Architecture Review',
-              '- [ ] **Architect** ' + architect,
+              ...checkboxes('Architect', architects),
               '',
               '### Stage 4 — Director Sign-off',
-              '- [ ] **Engineering Director** ' + director,
+              ...checkboxes('Engineering Director', directors),
               '',
               '---',
-              '> ✅ Once all boxes are checked the PR will be unblocked for merge.',
+              '> ✅ Once all required boxes are checked the PR will be unblocked for merge.',
+              '> _(For roles with multiple people, any one approval is sufficient)_',
               '> ❌ Close this issue to reject the PR.',
-            ].join('\n');
+            ];
 
             const issue = await github.rest.issues.create({
               owner: context.repo.owner,
               repo: 'approvals',
               title: '[' + teamName + '] Approval: ' + prTitle + ' (#' + prNumber + ')',
-              body,
+              body: lines.join('\n'),
               labels: ['pending-leadership', teamName.toLowerCase().replace(/\s+/g, '-')],
             });
 
             core.setOutput('issue_number', String(issue.data.number));
             core.setOutput('issue_url', issue.data.html_url);
+            
+            // Store arrays for later steps
+            core.setOutput('team_leads', process.env.TEAM_LEADS);
+            core.setOutput('product_owners', process.env.PRODUCT_OWNERS);
+            core.setOutput('eng_managers', process.env.ENG_MANAGERS);
 
       - name: Ping leadership on approval issue
         uses: actions/github-script@v7
         env:
           ISSUE_NUMBER: ${{ steps.create-issue.outputs.issue_number }}
-          TEAM_LEAD: ${{ steps.config.outputs.team_lead }}
-          PRODUCT_OWNER: ${{ steps.config.outputs.product_owner }}
-          ENG_MANAGER: ${{ steps.config.outputs.eng_manager }}
+          TEAM_LEADS: ${{ steps.config.outputs.team_leads }}
+          PRODUCT_OWNERS: ${{ steps.config.outputs.product_owners }}
+          ENG_MANAGERS: ${{ steps.config.outputs.eng_managers }}
           PR_REVIEWER: ${{ inputs.pr_reviewer }}
         with:
           github-token: ${{ secrets.ORG_APPROVAL_TOKEN }}
           script: |
-            const teamLead     = process.env.TEAM_LEAD;
-            const productOwner = process.env.PRODUCT_OWNER;
-            const engManager   = process.env.ENG_MANAGER;
-            const prReviewer   = process.env.PR_REVIEWER;
+            const teamLeads     = JSON.parse(process.env.TEAM_LEADS || '[]');
+            const productOwners = JSON.parse(process.env.PRODUCT_OWNERS || '[]');
+            const engManagers   = JSON.parse(process.env.ENG_MANAGERS || '[]');
+            const prReviewer    = process.env.PR_REVIEWER;
+            
+            const allPeople = [...teamLeads, ...productOwners, ...engManagers].join(' ');
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: 'approvals',
               issue_number: Number(process.env.ISSUE_NUMBER),
               body: '✅ **Stage 1 complete** — Code review approved by @' + prReviewer + '.\n\n'
-                  + teamLead + ' ' + productOwner + ' ' + engManager
+                  + allPeople
                   + ' — your approvals are needed for Stage 2. Please check your boxes above.'
             });
 
@@ -171,15 +189,17 @@ jobs:
           ISSUE_URL: ${{ steps.create-issue.outputs.issue_url }}
           PR_NUMBER: ${{ inputs.pr_number }}
           PR_REVIEWER: ${{ inputs.pr_reviewer }}
-          TEAM_LEAD: ${{ steps.config.outputs.team_lead }}
-          PRODUCT_OWNER: ${{ steps.config.outputs.product_owner }}
-          ENG_MANAGER: ${{ steps.config.outputs.eng_manager }}
+          TEAM_LEADS: ${{ steps.config.outputs.team_leads }}
+          PRODUCT_OWNERS: ${{ steps.config.outputs.product_owners }}
+          ENG_MANAGERS: ${{ steps.config.outputs.eng_managers }}
         with:
           github-token: ${{ secrets.ORG_APPROVAL_TOKEN }}
           script: |
-            const teamLead     = process.env.TEAM_LEAD;
-            const productOwner = process.env.PRODUCT_OWNER;
-            const engManager   = process.env.ENG_MANAGER;
+            const teamLeads     = JSON.parse(process.env.TEAM_LEADS || '[]');
+            const productOwners = JSON.parse(process.env.PRODUCT_OWNERS || '[]');
+            const engManagers   = JSON.parse(process.env.ENG_MANAGERS || '[]');
+            
+            const allPeople = [...teamLeads, ...productOwners, ...engManagers].join(' ');
 
             await github.rest.issues.createComment({
               owner: context.repo.owner,
@@ -189,7 +209,7 @@ jobs:
                   + 'Code review complete (approved by @' + process.env.PR_REVIEWER + '). '
                   + 'This PR now requires leadership approval before merge.\n\n'
                   + '➡️ **Track progress:** ' + process.env.ISSUE_URL + '\n\n'
-                  + '**Awaiting:** ' + teamLead + ' ' + productOwner + ' ' + engManager + '\n\n'
+                  + '**Awaiting:** ' + allPeople + '\n\n'
                   + 'The merge button will be unblocked automatically once all approvals are collected.'
             });
 
