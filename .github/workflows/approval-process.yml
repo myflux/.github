@@ -15,6 +15,9 @@ on:
       pr_author:
         required: true
         type: string
+      pr_reviewer:
+        required: true
+        type: string
       repo_name:
         required: true
         type: string
@@ -73,6 +76,7 @@ jobs:
           PR_TITLE: ${{ inputs.pr_title }}
           PR_URL: ${{ inputs.pr_url }}
           PR_AUTHOR: ${{ inputs.pr_author }}
+          PR_REVIEWER: ${{ inputs.pr_reviewer }}
           PR_NUMBER: ${{ inputs.pr_number }}
           REPO_NAME: ${{ inputs.repo_name }}
         with:
@@ -87,6 +91,7 @@ jobs:
             const prTitle      = process.env.PR_TITLE;
             const prUrl        = process.env.PR_URL;
             const prAuthor     = process.env.PR_AUTHOR;
+            const prReviewer   = process.env.PR_REVIEWER;
             const prNumber     = process.env.PR_NUMBER;
             const repoName     = process.env.REPO_NAME;
 
@@ -99,13 +104,14 @@ jobs:
               '| **Repo** | ' + repoName + ' |',
               '| **PR** | [' + prTitle + '](' + prUrl + ') |',
               '| **Author** | @' + prAuthor + ' |',
+              '| **Reviewed by** | @' + prReviewer + ' |',
               '',
               '---',
               '',
               '## Approval Checklist',
               '',
-              '### Stage 1 — Team Review',
-              '- [ ] **Team Assignee** — Initial review complete',
+              '### Stage 1 — Team Review ✅',
+              '- [x] **Team Reviewer** @' + prReviewer + ' — Code review approved',
               '',
               '### Stage 2 — Leadership Sign-off',
               '- [ ] **Tech Lead** ' + teamLead,
@@ -128,27 +134,62 @@ jobs:
               repo: 'approvals',
               title: '[' + teamName + '] Approval: ' + prTitle + ' (#' + prNumber + ')',
               body,
-              labels: ['pending-assignee', teamName.toLowerCase().replace(/\s+/g, '-')],
+              labels: ['pending-leadership', teamName.toLowerCase().replace(/\s+/g, '-')],
             });
 
             core.setOutput('issue_number', String(issue.data.number));
             core.setOutput('issue_url', issue.data.html_url);
+
+      - name: Ping leadership on approval issue
+        uses: actions/github-script@v7
+        env:
+          ISSUE_NUMBER: ${{ steps.create-issue.outputs.issue_number }}
+          TEAM_LEAD: ${{ steps.config.outputs.team_lead }}
+          PRODUCT_OWNER: ${{ steps.config.outputs.product_owner }}
+          ENG_MANAGER: ${{ steps.config.outputs.eng_manager }}
+          PR_REVIEWER: ${{ inputs.pr_reviewer }}
+        with:
+          github-token: ${{ secrets.ORG_APPROVAL_TOKEN }}
+          script: |
+            const teamLead     = process.env.TEAM_LEAD;
+            const productOwner = process.env.PRODUCT_OWNER;
+            const engManager   = process.env.ENG_MANAGER;
+            const prReviewer   = process.env.PR_REVIEWER;
+
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: 'approvals',
+              issue_number: Number(process.env.ISSUE_NUMBER),
+              body: '✅ **Stage 1 complete** — Code review approved by @' + prReviewer + '.\n\n'
+                  + teamLead + ' ' + productOwner + ' ' + engManager
+                  + ' — your approvals are needed for Stage 2. Please check your boxes above.'
+            });
 
       - name: Post issue link on PR
         uses: actions/github-script@v7
         env:
           ISSUE_URL: ${{ steps.create-issue.outputs.issue_url }}
           PR_NUMBER: ${{ inputs.pr_number }}
+          PR_REVIEWER: ${{ inputs.pr_reviewer }}
+          TEAM_LEAD: ${{ steps.config.outputs.team_lead }}
+          PRODUCT_OWNER: ${{ steps.config.outputs.product_owner }}
+          ENG_MANAGER: ${{ steps.config.outputs.eng_manager }}
         with:
           github-token: ${{ secrets.ORG_APPROVAL_TOKEN }}
           script: |
+            const teamLead     = process.env.TEAM_LEAD;
+            const productOwner = process.env.PRODUCT_OWNER;
+            const engManager   = process.env.ENG_MANAGER;
+
             await github.rest.issues.createComment({
               owner: context.repo.owner,
               repo: context.repo.repo,
               issue_number: Number(process.env.PR_NUMBER),
               body: '## 🔐 Approval Process Started\n\n'
-                  + 'This PR requires multi-stage approval before it can be merged.\n\n'
+                  + 'Code review complete (approved by @' + process.env.PR_REVIEWER + '). '
+                  + 'This PR now requires leadership approval before merge.\n\n'
                   + '➡️ **Track progress:** ' + process.env.ISSUE_URL + '\n\n'
+                  + '**Awaiting:** ' + teamLead + ' ' + productOwner + ' ' + engManager + '\n\n'
                   + 'The merge button will be unblocked automatically once all approvals are collected.'
             });
 
