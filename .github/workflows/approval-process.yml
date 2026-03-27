@@ -41,10 +41,18 @@ jobs:
       - name: Read approval-config.yml
         id: config
         run: |
-          if [ ! -f approval-config.yml ]; then
-            echo "ERROR: approval-config.yml not found in repo root."
-            exit 1
-          fi
+          echo "=== Current directory ==="
+          pwd
+          echo "=== Files in root ==="
+          ls -la
+          echo "=== Contents of approval-config.yml ==="
+          cat approval-config.yml
+          echo "=== yq version ==="
+          yq --version
+          echo "=== yq output ==="
+          yq '.team_name' approval-config.yml
+          yq '.team_lead' approval-config.yml
+
           echo "team_lead=$(yq '.team_lead' approval-config.yml)"         >> $GITHUB_OUTPUT
           echo "product_owner=$(yq '.product_owner' approval-config.yml)" >> $GITHUB_OUTPUT
           echo "eng_manager=$(yq '.eng_manager' approval-config.yml)"     >> $GITHUB_OUTPUT
