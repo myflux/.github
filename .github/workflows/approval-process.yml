@@ -1,0 +1,135 @@
+name: PR Approval Process (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      pr_number:
+        required: true
+        type: string
+      pr_title:
+        required: true
+        type: string
+      pr_url:
+        required: true
+        type: string
+      pr_author:
+        required: true
+        type: string
+      repo_name:
+        required: true
+        type: string
+    secrets:
+      ORG_APPROVAL_TOKEN:
+        required: true
+
+jobs:
+  create-approval-issue:
+    name: Create Approval Issue
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout calling repo
+        uses: actions/checkout@v4
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq \
+            https://github.com/mikefarah/yq/releases/latest/download/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Read approval-config.yml
+        id: config
+        run: |
+          if [ ! -f approval-config.yml ]; then
+            echo "ERROR: approval-config.yml not found in repo root."
+            exit 1
+          fi
+          echo "team_lead=$(yq '.team_lead' approval-config.yml)"         >> $GITHUB_OUTPUT
+          echo "product_owner=$(yq '.product_owner' approval-config.yml)" >> $GITHUB_OUTPUT
+          echo "eng_manager=$(yq '.eng_manager' approval-config.yml)"     >> $GITHUB_OUTPUT
+          echo "architect=$(yq '.architect' approval-config.yml)"         >> $GITHUB_OUTPUT
+          echo "director=$(yq '.director' approval-config.yml)"           >> $GITHUB_OUTPUT
+          echo "team_name=$(yq '.team_name' approval-config.yml)"         >> $GITHUB_OUTPUT
+
+      - name: Create approval issue
+        id: create-issue
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ORG_APPROVAL_TOKEN }}
+          script: |
+            const teamLead     = '${{ steps.config.outputs.team_lead }}';
+            const productOwner = '${{ steps.config.outputs.product_owner }}';
+            const engManager   = '${{ steps.config.outputs.eng_manager }}';
+            const architect    = '${{ steps.config.outputs.architect }}';
+            const director     = '${{ steps.config.outputs.director }}';
+            const teamName     = '${{ steps.config.outputs.team_name }}';
+
+            const body = `
+## PR Approval Request
+
+| Field | Value |
+|-------|-------|
+| **Team** | ${teamName} |
+| **Repo** | ${{ inputs.repo_name }} |
+| **PR** | [${{ inputs.pr_title }}](${{ inputs.pr_url }}) |
+| **Author** | @${{ inputs.pr_author }} |
+
+---
+
+## Approval Checklist
+
+### Stage 1 — Team Review
+- [ ] **Team Assignee** — Initial review complete
+
+### Stage 2 — Leadership Sign-off
+- [ ] **Tech Lead** ${teamLead}
+- [ ] **Product Owner** ${productOwner}
+- [ ] **Engineering Manager** ${engManager}
+
+### Stage 3 — Architecture Review
+- [ ] **Architect** ${architect}
+
+### Stage 4 — Director Sign-off
+- [ ] **Engineering Director** ${director}
+
+---
+> ✅ Once all boxes are checked the PR will be unblocked for merge.
+> ❌ Close this issue to reject the PR.
+            `.trim();
+
+            const issue = await github.rest.issues.create({
+              owner: context.repo.owner,
+              repo: 'approvals',
+              title: `[${teamName}] Approval: ${{ inputs.pr_title }} (#${{ inputs.pr_number }})`,
+              body,
+              labels: ['pending-assignee', teamName.toLowerCase().replace(/\s+/g, '-')],
+            });
+
+            core.setOutput('issue_number', issue.data.number);
+            core.setOutput('issue_url', issue.data.html_url);
+
+      - name: Post issue link on PR
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ORG_APPROVAL_TOKEN }}
+          script: |
+            await github.rest.issues.createComment({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: ${{ inputs.pr_number }},
+              body: `## 🔐 Approval Process Started\n\nThis PR requires multi-stage approval before it can be merged.\n\n➡️ **Track progress:** ${{ steps.create-issue.outputs.issue_url }}\n\nThe merge button will be unblocked automatically once all approvals are collected.`
+            });
+
+      - name: Block PR merge
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.ORG_APPROVAL_TOKEN }}
+          script: |
+            await github.rest.repos.createCommitStatus({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              sha: context.sha,
+              state: 'pending',
+              description: 'Awaiting multi-stage approval',
+              context: 'approval-process',
+              target_url: '${{ steps.create-issue.outputs.issue_url }}'
+            });
